@@ -18,7 +18,10 @@ use crate::interactive::{
     helpers::HINT_SESSION_INTERRUPT,
     sessions::{
         SessionState,
-        tools::{list_directory, list_epub_chapters, read_epub_chapter, read_text_file, search_text},
+        tools::{
+            list_directory, list_epub_chapters, read_directory, read_epub_chapter, read_text_file, search_text,
+            write_text_file,
+        },
     },
 };
 
@@ -169,6 +172,7 @@ pub async fn ensure_session(
             model_state.session_state = Some(Box::new(ChatSessionState::idle(session.clone(), context_limit)));
         }
     }
+    restore_resumed_messages(&mut state, &session, &model.identifier).await;
     Some(session)
 }
 
@@ -190,6 +194,8 @@ pub async fn create_session(
         session.add_tool(sleep).await?;
         session.add_tool(list_directory).await?;
         session.add_tool(read_text_file).await?;
+        session.add_tool(read_directory).await?;
+        session.add_tool(write_text_file).await?;
         session.add_tool(search_text).await?;
         session.add_tool(list_epub_chapters).await?;
         session.add_tool(read_epub_chapter).await?;
@@ -295,23 +301,26 @@ pub async fn run_session(
 
     let final_items = build_transcript(&session.messages().await, history_offset);
     let encoded_tokens = session.encoded_token_count().await;
-    let mut state = state.write();
-    if let Some(chat_state) = chat_state_mut(&mut state) {
-        chat_state.pending_items = Vec::new();
-        chat_state.pending_stats = None;
-        chat_state.cancel_token = None;
-        chat_state.status = ChatSessionStatus::Idle;
-        if let Some(encoded_tokens) = encoded_tokens {
-            chat_state.context_used = encoded_tokens;
-            chat_state.context_exact = true;
+    {
+        let mut state = state.write();
+        if let Some(chat_state) = chat_state_mut(&mut state) {
+            chat_state.pending_items = Vec::new();
+            chat_state.pending_stats = None;
+            chat_state.cancel_token = None;
+            chat_state.status = ChatSessionStatus::Idle;
+            if let Some(encoded_tokens) = encoded_tokens {
+                chat_state.context_used = encoded_tokens;
+                chat_state.context_exact = true;
+            }
+        }
+        if !final_items.is_empty() || latest_stats.is_some() {
+            state.history.push(HistoryCellType::ChatTranscript {
+                items: final_items,
+                stats: latest_stats,
+            });
         }
     }
-    if !final_items.is_empty() || latest_stats.is_some() {
-        state.history.push(HistoryCellType::ChatTranscript {
-            items: final_items,
-            stats: latest_stats,
-        });
-    }
+    persist_chat(&mut state, &session).await;
 }
 
 const COMPACT_TOKEN_LIMIT: u32 = 4_096;
@@ -463,14 +472,79 @@ pub async fn compact(state: State<ApplicationState>) {
     } else {
         format!("Compacted the conversation into ~{into}. The model now sees only this summary.")
     };
+    {
+        let mut snapshot = state.write();
+        snapshot.history.push(HistoryCellType::CommandResult {
+            result: note,
+        });
+        snapshot.history.push(HistoryCellType::ChatTranscript {
+            items: vec![TranscriptItem::Text(summary)],
+            stats: None,
+        });
+    }
+    persist_chat(&mut state, &session).await;
+}
+
+async fn restore_resumed_messages(
+    state: &mut State<ApplicationState>,
+    session: &ChatSession,
+    model_id: &str,
+) {
+    let messages = {
+        let snapshot = state.read();
+        let Some(saved) = snapshot.resume_into.as_ref() else {
+            return;
+        };
+        if saved.model_id != model_id {
+            return;
+        }
+        saved.messages.clone()
+    };
+    if messages.is_empty() {
+        state.write().resume_into = None;
+        return;
+    }
+    if let Err(error) = session.replace_messages(messages.clone()).await {
+        state.write().history.push(HistoryCellType::CommandResult {
+            result: format!("Could not restore the last chat: {error}"),
+        });
+        return;
+    }
+    let text = messages.iter().filter_map(|message| message.text()).collect::<Vec<_>>().join("\n");
+    let tokens = session
+        .count_text_tokens(&text)
+        .await
+        .unwrap_or_else(|| u32::try_from(text.chars().count() / 4).unwrap_or(u32::MAX));
     let mut snapshot = state.write();
-    snapshot.history.push(HistoryCellType::CommandResult {
-        result: note,
-    });
-    snapshot.history.push(HistoryCellType::ChatTranscript {
-        items: vec![TranscriptItem::Text(summary)],
-        stats: None,
-    });
+    snapshot.resume_into = None;
+    if let Some(model_state) = snapshot.model_state.as_mut() {
+        model_state.thinking_locked = true;
+    }
+    if let Some(chat_state) = chat_state_mut(&mut snapshot) {
+        chat_state.context_used = tokens;
+        chat_state.context_exact = false;
+    }
+}
+
+async fn persist_chat(
+    state: &mut State<ApplicationState>,
+    session: &ChatSession,
+) {
+    if state.read().resume_into.is_some() {
+        return;
+    }
+    let messages = session.messages().await;
+    let (model_id, model_name, history) = {
+        let snapshot = state.read();
+        let Some(model) = snapshot.model_state.as_ref().map(|model_state| model_state.model.clone()) else {
+            return;
+        };
+        (model.identifier.clone(), model.name(), snapshot.history.clone())
+    };
+    let saved = super::resume::SavedChat::capture(model_id, model_name, messages, history);
+    if saved.can_resume() {
+        super::resume::store_last_chat(&saved);
+    }
 }
 
 fn settle_compact(

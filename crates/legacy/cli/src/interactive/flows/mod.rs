@@ -5,6 +5,7 @@ mod model_families;
 mod model_registries;
 mod models;
 mod registry;
+mod resume;
 mod settings;
 mod theme;
 
@@ -15,6 +16,7 @@ pub use model_families::ModelFamiliesFlow;
 pub use model_registries::ModelRegistriesFlow;
 pub use models::ModelsFlow;
 pub use registry::{Command, CommandKind, FlowRegistry};
+pub use resume::ResumeFlow;
 pub use settings::SettingsFlow;
 pub use theme::ThemeFlow;
 

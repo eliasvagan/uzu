@@ -1,4 +1,4 @@
-use std::{fs, io::Write, path::Path};
+use std::{fs, io::Write, os::unix::fs::symlink, path::Path};
 
 use tempfile::tempdir;
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
@@ -107,6 +107,87 @@ fn zipped_epub_uses_chapter_headings_and_spine_order() {
     assert!(!first.contains("UNIQUE_ZIP_TWO"), "{first}");
     assert!(second.contains("UNIQUE_ZIP_TWO"), "{second}");
     assert!(second.starts_with("Chapter 2 of 2"), "{second}");
+}
+
+#[test]
+fn write_text_file_creates_any_text_format_and_refuses_to_clobber() {
+    let root = tempdir().unwrap();
+    let essay = root.path().join("drafts/garden.md");
+    let path = essay.display().to_string();
+    let markdown = "# The Garden\n\nSoil remembers the café.\n";
+
+    let wrote = write_text_file::call(path.clone(), markdown.to_string(), None).unwrap();
+    assert_eq!(wrote, format!("Wrote {} characters to {path}", markdown.chars().count()));
+    assert_eq!(fs::read_to_string(&essay).unwrap(), markdown);
+    assert!(!essay.with_file_name("garden.md.uzu-tmp").exists());
+
+    let blocked = write_text_file::call(path.clone(), "<p>replacement</p>".to_string(), None).unwrap_err();
+    assert!(blocked.contains("already exists"), "{blocked}");
+    assert_eq!(fs::read_to_string(&essay).unwrap(), markdown);
+
+    let html = root.path().join("drafts/garden.html");
+    let page = "<article><h1>The Garden</h1></article>\n";
+    let replaced = write_text_file::call(html.display().to_string(), page.to_string(), Some(true)).unwrap();
+    assert!(replaced.contains("Wrote"), "{replaced}");
+    assert_eq!(fs::read_to_string(&html).unwrap(), page);
+
+    let overwritten = write_text_file::call(path, "replaced\n".to_string(), Some(true)).unwrap();
+    assert!(overwritten.contains("Wrote"), "{overwritten}");
+    assert_eq!(fs::read_to_string(&essay).unwrap(), "replaced\n");
+
+    let empty = write_text_file::call(essay.display().to_string(), "  \n".to_string(), Some(true)).unwrap_err();
+    assert!(empty.contains("must not be empty"), "{empty}");
+    let directory =
+        write_text_file::call(root.path().display().to_string(), "nope".to_string(), Some(true)).unwrap_err();
+    assert!(directory.contains("is a directory"), "{directory}");
+    let huge = "a".repeat(1024 * 1024 + 1);
+    let too_big = write_text_file::call(essay.display().to_string(), huge, Some(true)).unwrap_err();
+    assert!(too_big.contains("larger than 1 MiB"), "{too_big}");
+
+    let home = dirs::home_dir().unwrap();
+    assert_eq!(super::expand_user_path("~/notes/essay.tex"), home.join("notes/essay.tex"));
+    assert_eq!(super::expand_user_path("~"), home);
+}
+
+#[test]
+fn read_directory_returns_text_files_and_skips_hidden_binary_and_deeper_folders() {
+    let root = tempdir().unwrap();
+    fs::write(root.path().join("essay.md"), "# Visible\n").unwrap();
+    fs::write(root.path().join("notes.txt"), "hello café\n").unwrap();
+    fs::write(root.path().join("data.bin"), b"abc\0def").unwrap();
+    fs::write(root.path().join(".env"), "SECRET_ENV=1\n").unwrap();
+    fs::create_dir(root.path().join("target")).unwrap();
+    fs::write(root.path().join("target/secret.txt"), "TARGET_SECRET\n").unwrap();
+    fs::create_dir(root.path().join("nested")).unwrap();
+    fs::write(root.path().join("nested/page.txt"), "NESTED_PAGE\n").unwrap();
+    let outside = tempdir().unwrap();
+    fs::write(outside.path().join("secret.txt"), "SYMLINK_SECRET\n").unwrap();
+    symlink(outside.path().join("secret.txt"), root.path().join("alias.txt")).unwrap();
+
+    let path = root.path().display().to_string();
+    let shallow = read_directory::call(path.clone(), None).unwrap();
+    assert!(shallow.contains("2 text files"), "{shallow}");
+    assert!(shallow.contains("--- essay.md ---\n# Visible\n"), "{shallow}");
+    assert!(shallow.contains("--- notes.txt ---\nhello café\n"), "{shallow}");
+    assert!(shallow.contains("skipped data.bin (not UTF-8 text)"), "{shallow}");
+    assert!(!shallow.contains("SECRET_ENV"), "{shallow}");
+    assert!(!shallow.contains("TARGET_SECRET"), "{shallow}");
+    assert!(!shallow.contains("NESTED_PAGE"), "{shallow}");
+    assert!(!shallow.contains("SYMLINK_SECRET"), "{shallow}");
+
+    let deep = read_directory::call(path.clone(), Some(2)).unwrap();
+    assert!(deep.contains("3 text files"), "{deep}");
+    assert!(deep.contains("--- nested/page.txt ---\nNESTED_PAGE\n"), "{deep}");
+    assert!(!deep.contains("SECRET_ENV"), "{deep}");
+
+    let file_error = read_directory::call(root.path().join("notes.txt").display().to_string(), None).unwrap_err();
+    assert!(file_error.contains("use read_text_file"), "{file_error}");
+    let depth_error = read_directory::call(path, Some(0)).unwrap_err();
+    assert!(depth_error.contains("depth must be from 1 to 4"), "{depth_error}");
+
+    let empty = tempdir().unwrap();
+    let none = read_directory::call(empty.path().display().to_string(), Some(1)).unwrap();
+    assert!(none.contains("(no text files)"), "{none}");
 }
 
 fn write_unpacked_epub(

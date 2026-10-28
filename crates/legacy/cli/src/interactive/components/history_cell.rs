@@ -1,4 +1,5 @@
 use iocraft::prelude::*;
+use serde::{Deserialize, Serialize};
 use shoji::types::session::{
     chat::ChatReplyStats, classification::ClassificationOutput, text_to_speech::TextToSpeechStats,
 };
@@ -8,7 +9,7 @@ use crate::interactive::{
     helpers::{SYMBOL_COMMAND, SYMBOL_INPUT, SYMBOL_INPUT_RESULT, SYMBOL_LONG_DASH},
 };
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum TranscriptItem {
     Thinking(String),
     ToolCall {
@@ -18,7 +19,7 @@ pub enum TranscriptItem {
     Text(String),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum HistoryCellType {
     Command {
         name: String,

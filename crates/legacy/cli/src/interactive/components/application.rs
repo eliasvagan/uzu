@@ -17,11 +17,11 @@ use crate::{
         APP_IDENTIFIER,
         components::{CommandInput, HistoryCell, HistoryCellType, Logo, Preferences, SelectedModel, Theme},
         flows::{
-            AuthFlow, CommandKind, ExitFlow, Flow, FlowEvent, FlowRegistry, ModelRegistriesFlow, SettingsFlow,
-            ThemeFlow,
+            AuthFlow, CommandKind, ExitFlow, Flow, FlowEvent, FlowRegistry, ModelRegistriesFlow, ResumeFlow,
+            SettingsFlow, ThemeFlow,
         },
         helpers::SYMBOL_COMMAND,
-        sessions::{self, SessionState},
+        sessions::{self, ResumeOffer, SavedChat, SessionState},
     },
 };
 
@@ -54,6 +54,11 @@ pub struct ApplicationState {
     thinking_override: Option<ThinkingPreference>,
     pub seed: Option<i64>,
     pub no_tools: bool,
+    /// Model requested with `--model` for this process. A continued chat keeps its own model.
+    pub launch_model: Option<String>,
+    pub pending_resume: Option<SavedChat>,
+    pub resume_into: Option<SavedChat>,
+    pub resume_offer: Option<ResumeOffer>,
     pub engine: Engine,
     pub settings: Option<Settings>,
     pub flow: Option<Box<dyn Flow>>,
@@ -110,6 +115,90 @@ impl ApplicationState {
     fn settings_file_path(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
         confy::get_configuration_file_path(APP_IDENTIFIER, name).map_err(Into::into)
     }
+
+    pub async fn continue_last_chat(state: &mut State<Self>) {
+        let saved = state.write().pending_resume.take();
+        let Some(saved) = saved else {
+            state.write().flow = None;
+            return;
+        };
+        let model_id = saved.model_id.clone();
+        {
+            let mut app = state.write();
+            app.history = saved.history.clone();
+            app.history.push(HistoryCellType::CommandResult {
+                result: "Continuing the last chat.".to_string(),
+            });
+            app.resume_into = Some(saved);
+            app.flow = None;
+        }
+        open_model(state, Some(model_id)).await;
+        let mut app = state.write();
+        if app.resume_into.is_some()
+            && let Some(model_state) = app.model_state.as_mut()
+        {
+            model_state.thinking_locked = true;
+        }
+    }
+
+    pub async fn start_new_chat(state: &mut State<Self>) {
+        sessions::clear_last_chat();
+        let identifier = {
+            let mut app = state.write();
+            app.pending_resume = None;
+            app.resume_into = None;
+            app.resume_offer = None;
+            app.history.clear();
+            app.history.push(HistoryCellType::CommandResult {
+                result: "Started a new chat.".to_string(),
+            });
+            app.flow = None;
+            app.launch_model.clone().or_else(|| app.preferences().selected_model_id.clone())
+        };
+        open_model(state, identifier).await;
+    }
+}
+
+async fn open_model(
+    state: &mut State<ApplicationState>,
+    identifier: Option<String>,
+) {
+    let engine = state.read().engine.clone();
+    let Some(identifier) = identifier else {
+        state.write().flow = Some(Box::new(ModelRegistriesFlow));
+        return;
+    };
+    match engine.model(identifier.clone()).await {
+        Ok(Some(model)) => {
+            let model_exists = model.is_downloadable()
+                || !model.is_on_device()
+                || matches!(engine.model_path(&model).await, Some(path) if std::path::Path::new(&path).exists());
+            if !model_exists {
+                state.write().flow = Some(Box::new(ModelRegistriesFlow));
+                return;
+            }
+            state.write().model_state = Some(ModelState {
+                model,
+                download_state: DownloadState::default(),
+                session_state: None,
+                thinking: ThinkingSupport::default(),
+                sampling_defaults: SamplingParameters::default(),
+                thinking_locked: false,
+            });
+        },
+        Ok(None) => {
+            state.write().history.push(HistoryCellType::CommandResult {
+                result: format!("Unknown model: {}", identifier),
+            });
+            state.write().flow = Some(Box::new(ModelRegistriesFlow));
+        },
+        Err(error) => {
+            state.write().history.push(HistoryCellType::CommandResult {
+                result: format!("Failed to load model {}: {}", identifier, error),
+            });
+            state.write().flow = Some(Box::new(ModelRegistriesFlow));
+        },
+    }
 }
 
 #[component]
@@ -118,6 +207,9 @@ pub fn Application(
     mut hooks: Hooks,
 ) -> impl Into<AnyElement<'static>> {
     let engine = props.engine.clone().expect("Application requires an engine");
+    let pending_resume = sessions::load_last_chat();
+    let resume_offer = pending_resume.as_ref().map(SavedChat::offer);
+    let show_resume = pending_resume.is_some();
 
     let state = hooks.use_state(|| ApplicationState {
         engine,
@@ -132,7 +224,15 @@ pub fn Application(
         }),
         seed: props.seed,
         no_tools: props.no_tools,
-        flow: None,
+        launch_model: props.model.clone(),
+        pending_resume,
+        resume_into: None,
+        resume_offer,
+        flow: if show_resume {
+            Some(Box::new(ResumeFlow))
+        } else {
+            None
+        },
         history: Vec::new(),
         registry: FlowRegistry::default()
             .register("auth", "Add models from a specific provider", false, || Box::new(AuthFlow))
@@ -145,50 +245,16 @@ pub fn Application(
         model_state: None,
     });
     let (width, _) = hooks.use_terminal_size();
-    let requested_model = props.model.clone().or_else(|| state.read().preferences().selected_model_id.clone());
 
     hooks.use_future({
-        let engine = state.read().engine.clone();
         let mut state = state;
         async move {
-            let Some(identifier) = requested_model else {
-                state.write().flow = Some(Box::new(ModelRegistriesFlow));
+            if state.read().pending_resume.is_some() {
                 return;
-            };
-            match engine.model(identifier.clone()).await {
-                Ok(Some(model)) => {
-                    let model_exists = model.is_downloadable()
-                        || !model.is_on_device()
-                        || matches!(
-                            engine.model_path(&model).await,
-                            Some(path) if std::path::Path::new(&path).exists()
-                        );
-                    if !model_exists {
-                        state.write().flow = Some(Box::new(ModelRegistriesFlow));
-                        return;
-                    }
-                    state.write().model_state = Some(ModelState {
-                        model,
-                        download_state: DownloadState::default(),
-                        session_state: None,
-                        thinking: ThinkingSupport::default(),
-                        sampling_defaults: SamplingParameters::default(),
-                        thinking_locked: false,
-                    });
-                },
-                Ok(None) => {
-                    state.write().history.push(HistoryCellType::CommandResult {
-                        result: format!("Unknown model: {}", identifier),
-                    });
-                    state.write().flow = Some(Box::new(ModelRegistriesFlow));
-                },
-                Err(error) => {
-                    state.write().history.push(HistoryCellType::CommandResult {
-                        result: format!("Failed to load model {}: {}", identifier, error),
-                    });
-                    state.write().flow = Some(Box::new(ModelRegistriesFlow));
-                },
             }
+            let identifier =
+                state.read().launch_model.clone().or_else(|| state.read().preferences().selected_model_id.clone());
+            open_model(&mut state, identifier).await;
         }
     });
 
@@ -333,6 +399,13 @@ pub fn Application(
             false
         };
         if consumed_by_session {
+            return;
+        }
+
+        if state.pending_resume.is_some() {
+            if is_ctrl_c {
+                state.flow = Some(Box::new(ExitFlow));
+            }
             return;
         }
 

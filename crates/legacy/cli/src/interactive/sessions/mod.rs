@@ -2,10 +2,13 @@ mod attachments;
 pub mod chat;
 pub mod classification;
 mod compact;
+mod resume;
 pub mod text_to_speech;
 mod tools;
 
 use std::any::Any;
+
+pub use resume::{ResumeOffer, SavedChat, clear_last_chat, load_last_chat};
 
 use crate::interactive::components::HistoryCellType;
 

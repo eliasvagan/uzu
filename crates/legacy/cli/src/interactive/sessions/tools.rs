@@ -8,6 +8,12 @@ use nagare::tool::uzu_tool_function;
 use zip::{ZipArchive, result::ZipError};
 
 const MAX_DIRECTORY_ENTRIES: usize = 300;
+const MAX_DIRECTORY_FILES: usize = 40;
+const MAX_DIRECTORY_DEPTH: u32 = 4;
+const MAX_DIRECTORY_CHARS: usize = 48_000;
+const MAX_DIRECTORY_FILE_CHARS: usize = 16_000;
+const MAX_DIRECTORY_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_WRITE_BYTES: usize = 1024 * 1024;
 const DEFAULT_TEXT_LINES: u32 = 200;
 const MAX_TEXT_LINES: u32 = 400;
 const MAX_TEXT_CHARS: usize = 48_000;
@@ -128,6 +134,154 @@ pub(crate) fn read_text_file(
         output.push(']');
     }
     Ok(output)
+}
+
+/// Read UTF-8 text files in a directory. Skips hidden names, binary files, symlinks, .git, target, and node_modules. Depth 1 reads only this directory. Returns at most 40 files and 48000 characters.
+#[uzu_tool_function]
+pub(crate) fn read_directory(
+    /// Absolute or relative path of the directory. A leading ~/ is your home directory.
+    path: String,
+    /// How many directory levels to enter, from 1 to 4. Omit for 1.
+    depth: Option<u32>,
+) -> Result<String, String> {
+    let depth = depth.unwrap_or(1);
+    if !(1..=MAX_DIRECTORY_DEPTH).contains(&depth) {
+        return Err(format!("depth must be from 1 to {MAX_DIRECTORY_DEPTH}"));
+    }
+    let directory = expand_user_path(&path);
+    let display = directory.display().to_string();
+    let metadata = fs::metadata(&directory).map_err(|error| format!("Cannot read {path}: {error}"))?;
+    if !metadata.is_dir() {
+        return Err(format!("{path} is a file; use read_text_file"));
+    }
+    let mut files = Vec::new();
+    let mut files_truncated = false;
+    collect_directory_files(&directory, depth as usize, &mut files, &mut files_truncated);
+    files.sort();
+    let mut body = String::new();
+    let mut notes = Vec::new();
+    let mut shown = 0usize;
+    for file in &files {
+        if shown >= MAX_DIRECTORY_FILES {
+            files_truncated = true;
+            break;
+        }
+        let relative = file.strip_prefix(&directory).unwrap_or(file).display().to_string();
+        let Ok(metadata) = fs::metadata(file) else {
+            notes.push(format!("skipped {relative}"));
+            continue;
+        };
+        if metadata.len() > MAX_DIRECTORY_FILE_BYTES {
+            notes.push(format!("skipped {relative} ({})", format_bytes(metadata.len())));
+            continue;
+        }
+        let Ok(bytes) = fs::read(file) else {
+            notes.push(format!("skipped {relative}"));
+            continue;
+        };
+        let text = match decode_text(&relative, &bytes) {
+            Ok(text) => text,
+            Err(_) => {
+                notes.push(format!("skipped {relative} (not UTF-8 text)"));
+                continue;
+            },
+        };
+        let per_file_limit = text.chars().count() > MAX_DIRECTORY_FILE_CHARS;
+        let mut text = truncate_chars(&text, MAX_DIRECTORY_FILE_CHARS);
+        let separator = if body.is_empty() {
+            ""
+        } else {
+            "\n\n"
+        };
+        let header = format!("--- {relative} ---\n");
+        let overhead = separator.chars().count() + header.chars().count();
+        let remaining = MAX_DIRECTORY_CHARS.saturating_sub(body.chars().count());
+        if overhead > remaining {
+            files_truncated = true;
+            break;
+        }
+        let room = remaining - overhead;
+        if text.chars().count() > room {
+            if room == 0 {
+                files_truncated = true;
+                break;
+            }
+            text = truncate_chars(&text, room);
+            notes.push(format!("{relative} truncated"));
+            files_truncated = true;
+        } else if per_file_limit {
+            notes.push(format!("{relative} truncated"));
+        }
+        body.push_str(separator);
+        body.push_str(&header);
+        body.push_str(&text);
+        shown += 1;
+        if files_truncated {
+            break;
+        }
+    }
+    if files_truncated {
+        notes.push("more files were not read".to_string());
+    }
+    if shown == 0 && notes.is_empty() {
+        return Ok(format!("{display}\n(no text files)"));
+    }
+    let mut output = format!("{display}\n{shown} text files");
+    if !body.is_empty() {
+        output.push_str("\n\n");
+        output.push_str(&body);
+    }
+    if !notes.is_empty() {
+        output.push_str("\n[");
+        output.push_str(&notes.join("; "));
+        output.push(']');
+    }
+    Ok(output)
+}
+
+/// Write UTF-8 text to a file. The format is whatever text you put in content: Markdown, HTML, LaTeX, CSV, JSON, or plain text. Pick a path whose extension matches. Creates missing parent directories. Does not replace an existing file unless overwrite is true.
+#[uzu_tool_function]
+pub(crate) fn write_text_file(
+    /// Absolute or relative path to create. A leading ~/ is your home directory.
+    path: String,
+    /// Full file contents. This is the essay, page, or document itself.
+    content: String,
+    /// Set true to replace a file that already exists. Omit to refuse.
+    overwrite: Option<bool>,
+) -> Result<String, String> {
+    if content.trim().is_empty() {
+        return Err("content must not be empty".to_string());
+    }
+    if content.len() > MAX_WRITE_BYTES {
+        return Err(format!("content is {} and larger than 1 MiB", format_bytes(content.len() as u64)));
+    }
+    let file = expand_user_path(&path);
+    let display = file.display().to_string();
+    let Some(file_name) = file.file_name() else {
+        return Err(format!("{path} is not a file path"));
+    };
+    if file_name.is_empty() {
+        return Err(format!("{path} is not a file path"));
+    }
+    if let Ok(metadata) = fs::symlink_metadata(&file) {
+        if metadata.is_dir() {
+            return Err(format!("{path} is a directory"));
+        }
+        if !overwrite.unwrap_or(false) {
+            return Err(format!("{path} already exists; pass overwrite true to replace it"));
+        }
+    }
+    let parent = file.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    fs::create_dir_all(parent).map_err(|error| format!("Cannot create {}: {error}", parent.display()))?;
+    let mut temporary_name = file_name.to_os_string();
+    temporary_name.push(".uzu-tmp");
+    let temporary = file.with_file_name(temporary_name);
+    fs::write(&temporary, content.as_bytes()).map_err(|error| format!("Cannot write {display}: {error}"))?;
+    if let Err(error) = fs::rename(&temporary, &file) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("Cannot write {display}: {error}"));
+    }
+    Ok(format!("Wrote {} characters to {display}", content.chars().count()))
 }
 
 /// Search a text file, or text files under a directory, for a literal string. Skips binary files, .git, target, and node_modules. Returns at most 30 matching lines.
@@ -313,6 +467,61 @@ enum EpubStore {
         archive: ZipArchive<File>,
         opf_dir: String,
     },
+}
+
+fn expand_user_path(path: &str) -> PathBuf {
+    if path == "~" {
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(path));
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(path)
+}
+
+fn collect_directory_files(
+    directory: &Path,
+    depth_left: usize,
+    files: &mut Vec<PathBuf>,
+    truncated: &mut bool,
+) {
+    if *truncated || files.len() >= MAX_DIRECTORY_FILES {
+        *truncated = true;
+        return;
+    }
+    if depth_left == 0 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let mut entries = entries.flatten().collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        if *truncated || files.len() >= MAX_DIRECTORY_FILES {
+            *truncated = true;
+            return;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || matches!(name.as_ref(), "target" | "node_modules") {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            collect_directory_files(&path, depth_left.saturating_sub(1), files, truncated);
+        } else if metadata.is_file() {
+            files.push(path);
+        }
+    }
 }
 
 fn format_bytes(bytes: u64) -> String {
