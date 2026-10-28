@@ -16,6 +16,18 @@ A high-performance inference engine for AI models. It allows you to deploy AI di
 - Utilizes unified memory on Apple devices
 - [Broad model support](https://trymirai.com/local-models)
 
+## Added in this fork
+
+Run the CLI with `cargo run --release -p cli`.
+
+| Feature | What it does |
+| --- | --- |
+| File tools | List, read, and search text files. List and read EPUB chapters. |
+| Attach a path | Drop or paste a path. The file is included in the next message. |
+| Context | The status line shows tokens used. `/compact` summarizes the chat and frees space. |
+| Save a document | Read a directory, then write Markdown, HTML, LaTeX, or other text to any path. |
+| Resume | On open, continue the last chat or start a new one. |
+
 ## Quick Start
 
 
