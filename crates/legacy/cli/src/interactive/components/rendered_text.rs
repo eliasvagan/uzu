@@ -91,25 +91,30 @@ impl RenderedText {
         self.position = 0;
     }
 
-    pub fn add_character(
+    pub fn insert_text(
         &mut self,
-        character: char,
+        text: &str,
     ) {
+        if text.is_empty() {
+            return;
+        }
         let position_byte_index = self
             .original_text
             .grapheme_indices(true)
             .nth(self.position)
             .map(|(byte_index, _)| byte_index)
             .unwrap_or(self.original_text.len());
-
         let mut next_text = self.original_text.clone();
-        next_text.insert(position_byte_index, character);
-
-        let previous_length = graphemes_length(&self.original_text);
-        let next_length = graphemes_length(&next_text);
-
+        next_text.insert_str(position_byte_index, text);
         self.original_text = next_text;
-        self.position += next_length.saturating_sub(previous_length);
+        self.position += graphemes_length(text);
+    }
+
+    pub fn add_character(
+        &mut self,
+        character: char,
+    ) {
+        self.insert_text(&character.to_string());
     }
 
     pub fn remove_character(&mut self) {
@@ -182,6 +187,21 @@ impl RenderedText {
 
 fn graphemes_length(text: &str) -> usize {
     text.grapheme_indices(true).count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insert_text_lands_at_the_cursor() {
+        let mut text = RenderedText::new();
+        text.insert_text("ac");
+        text.position = 1;
+        text.insert_text("b");
+        assert_eq!(text.original_text, "abc");
+        assert_eq!(text.position, 2);
+    }
 }
 
 pub fn grapheme_at_visual_position(

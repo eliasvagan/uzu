@@ -371,6 +371,23 @@ impl Session {
     pub fn sampling_defaults(&self) -> SamplingParameters {
         self.instance.sampling_defaults()
     }
+
+    pub fn context_limit(&self) -> Option<usize> {
+        self.instance.max_context_length()
+    }
+
+    pub fn encoded_token_count(&self) -> usize {
+        self.encoding.state().tokens.len()
+    }
+
+    pub fn count_text_tokens(
+        &self,
+        text: &str,
+    ) -> Result<usize, ChatSessionError> {
+        self.encoding.tokenize(text).map(|tokens| tokens.len()).map_err(|error| ChatSessionError::Backend {
+            message: error.to_string(),
+        })
+    }
 }
 
 fn describe_reprefill(

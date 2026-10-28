@@ -106,18 +106,6 @@ pub fn TextInput(
         if focus.is_disabled() {
             return;
         }
-        let TerminalEvent::Key(KeyEvent {
-            code,
-            kind,
-            modifiers,
-            ..
-        }) = event
-        else {
-            return;
-        };
-        if kind == KeyEventKind::Release {
-            return;
-        }
 
         let notify_change = {
             let handlers = handlers.clone();
@@ -131,6 +119,37 @@ pub fn TextInput(
                 }
             }
         };
+
+        if let TerminalEvent::BracketedPaste(pasted) = &event {
+            if focus.is_minimal() {
+                return;
+            }
+            let pasted = pasted.trim_end_matches(['\n', '\r']);
+            if pasted.is_empty() {
+                return;
+            }
+            pending_enter_identifier.set(None);
+            let Some(mut state) = state.try_write() else {
+                return;
+            };
+            state.insert_text(pasted);
+            drop(state);
+            notify_change();
+            return;
+        }
+
+        let TerminalEvent::Key(KeyEvent {
+            code,
+            kind,
+            modifiers,
+            ..
+        }) = event
+        else {
+            return;
+        };
+        if kind == KeyEventKind::Release {
+            return;
+        }
 
         if pending_enter_identifier.try_get().flatten().is_some() {
             pending_enter_identifier.set(None);

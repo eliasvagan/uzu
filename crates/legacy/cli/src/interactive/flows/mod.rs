@@ -14,7 +14,7 @@ use iocraft::prelude::*;
 pub use model_families::ModelFamiliesFlow;
 pub use model_registries::ModelRegistriesFlow;
 pub use models::ModelsFlow;
-pub use registry::{Command, FlowRegistry};
+pub use registry::{Command, CommandKind, FlowRegistry};
 pub use settings::SettingsFlow;
 pub use theme::ThemeFlow;
 

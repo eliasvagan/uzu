@@ -5,11 +5,18 @@ use crate::interactive::flows::Flow;
 pub type FlowFactory = Arc<dyn Fn() -> Box<dyn Flow> + Send + Sync>;
 
 #[derive(Clone)]
+pub enum CommandKind {
+    Flow(FlowFactory),
+    Compact,
+}
+
+#[derive(Clone)]
 pub struct Command {
     pub name: String,
     pub description: String,
     pub requires_model: bool,
-    pub factory: FlowFactory,
+    pub requires_chat: bool,
+    pub kind: CommandKind,
 }
 
 #[derive(Clone, Default)]
@@ -33,9 +40,24 @@ impl FlowRegistry {
             name: name.clone(),
             description: description.into(),
             requires_model,
-            factory: Arc::new(factory),
+            requires_chat: false,
+            kind: CommandKind::Flow(Arc::new(factory)),
         };
         self.commands.insert(name, command);
+        self
+    }
+
+    pub fn register_compact(mut self) -> Self {
+        self.commands.insert(
+            "compact".to_string(),
+            Command {
+                name: "compact".to_string(),
+                description: "Summarize the chat and free context".to_string(),
+                requires_model: true,
+                requires_chat: true,
+                kind: CommandKind::Compact,
+            },
+        );
         self
     }
 

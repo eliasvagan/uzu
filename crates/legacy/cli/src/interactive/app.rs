@@ -65,6 +65,7 @@ impl CliApplication {
             )
         }
         .render_loop()
+        .enable_bracketed_paste()
         .await
         .map_err(|error| CliError::RenderingError {
             message: error.to_string(),

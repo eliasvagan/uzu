@@ -5,7 +5,10 @@ use uzu::storage::DownloadPhase;
 use crate::interactive::{
     components::{ApplicationState, InputType, Selector, SelectorItem, SelectorStyle, TextInput, TextInputFocus},
     flows::Command,
-    helpers::{HINT_COMMANDS, HINT_SEND, HINT_STORAGE_DELETE, HINT_STORAGE_PAUSE_RESUME, SYMBOL_COMMAND, SYMBOL_INPUT},
+    helpers::{
+        HINT_COMMANDS, HINT_FILES, HINT_SEND, HINT_STORAGE_DELETE, HINT_STORAGE_PAUSE_RESUME, SYMBOL_COMMAND,
+        SYMBOL_INPUT,
+    },
 };
 
 const SAFE_PADDING: u16 = 1;
@@ -83,6 +86,7 @@ fn valid_commands(
         return Vec::new();
     };
     let model_loaded = state.read().model_state.is_some();
+    let chat_ready = state.read().model_state.as_ref().is_some_and(|model_state| model_state.model.is_chat_capable());
     state
         .read()
         .registry
@@ -90,6 +94,7 @@ fn valid_commands(
         .into_iter()
         .filter(|command| command.name.starts_with(command_name))
         .filter(|command| !command.requires_model || model_loaded)
+        .filter(|command| !command.requires_chat || chat_ready)
         .collect()
 }
 
@@ -112,6 +117,7 @@ fn hint_component(
             hints.push(HINT_SEND.to_string());
         },
     }
+    hints.push(HINT_FILES.to_string());
     hints.push(HINT_COMMANDS.to_string());
 
     if commands.is_empty() {

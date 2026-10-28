@@ -1,6 +1,9 @@
+mod attachments;
 pub mod chat;
 pub mod classification;
+mod compact;
 pub mod text_to_speech;
+mod tools;
 
 use std::any::Any;
 

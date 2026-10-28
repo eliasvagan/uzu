@@ -16,7 +16,10 @@ use crate::{
     interactive::{
         APP_IDENTIFIER,
         components::{CommandInput, HistoryCell, HistoryCellType, Logo, Preferences, SelectedModel, Theme},
-        flows::{AuthFlow, ExitFlow, Flow, FlowEvent, FlowRegistry, ModelRegistriesFlow, SettingsFlow, ThemeFlow},
+        flows::{
+            AuthFlow, CommandKind, ExitFlow, Flow, FlowEvent, FlowRegistry, ModelRegistriesFlow, SettingsFlow,
+            ThemeFlow,
+        },
         helpers::SYMBOL_COMMAND,
         sessions::{self, SessionState},
     },
@@ -137,7 +140,8 @@ pub fn Application(
             .register("settings", "Configure thinking and sampling", true, || Box::new(SettingsFlow))
             .register("theme", "Choose the theme", false, || Box::new(ThemeFlow))
             .register("exit", "Exit the CLI", false, || Box::new(ExitFlow))
-            .register("quit", "Exit the CLI", false, || Box::new(ExitFlow)),
+            .register("quit", "Exit the CLI", false, || Box::new(ExitFlow))
+            .register_compact(),
         model_state: None,
     });
     let (width, _) = hooks.use_terminal_size();
@@ -192,20 +196,42 @@ pub fn Application(
         let mut state = state;
 
         if let Some(name) = text.strip_prefix(SYMBOL_COMMAND) {
+            let name = name.trim();
+            let command_name = name.split_whitespace().next().unwrap_or(name);
             state.write().history.push(HistoryCellType::Command {
-                name: name.to_string(),
+                name: command_name.to_string(),
             });
             let registry = state.read().registry.clone();
             let model_loaded = state.read().model_state.is_some();
-            match registry.command(name) {
+            let busy = state.read().session_state().is_some_and(SessionState::is_busy);
+            match registry.command(command_name) {
                 Some(command) if command.requires_model && !model_loaded => {
+                    let result = if matches!(command.kind, CommandKind::Compact) {
+                        "Load a chat model first."
+                    } else {
+                        "Load a model first to open settings"
+                    };
                     state.write().history.push(HistoryCellType::CommandResult {
-                        result: "Load a model first to open settings".to_string(),
+                        result: result.to_string(),
                     })
                 },
-                Some(command) => state.write().flow = Some((command.factory)()),
+                Some(command) if matches!(command.kind, CommandKind::Compact) => {
+                    if busy {
+                        state.write().history.push(HistoryCellType::CommandResult {
+                            result: "Wait for the current reply to finish.".to_string(),
+                        });
+                        return;
+                    }
+                    sessions::chat::compact(state).await;
+                },
+                Some(command) => {
+                    let CommandKind::Flow(factory) = command.kind else {
+                        return;
+                    };
+                    state.write().flow = Some(factory());
+                },
                 None => state.write().history.push(HistoryCellType::CommandResult {
-                    result: format!("Unknown command: /{}", name),
+                    result: format!("Unknown command: /{}", command_name),
                 }),
             }
             return;

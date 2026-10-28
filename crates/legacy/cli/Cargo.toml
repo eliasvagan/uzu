@@ -53,6 +53,10 @@ unicode-segmentation.workspace = true
 unicode-width.workspace = true
 uuid.workspace = true
 uzu = { workspace = true, default-features = false }
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

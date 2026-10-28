@@ -116,6 +116,30 @@ impl Instance {
             Instance::Message(_) => None,
         }
     }
+
+    pub fn context_limit(&self) -> Option<usize> {
+        match self {
+            Instance::Token(session) => session.context_limit(),
+            Instance::Message(_) => None,
+        }
+    }
+
+    pub fn encoded_token_count(&self) -> Option<usize> {
+        match self {
+            Instance::Token(session) => Some(session.encoded_token_count()),
+            Instance::Message(_) => None,
+        }
+    }
+
+    pub fn count_text_tokens(
+        &self,
+        text: &str,
+    ) -> Option<usize> {
+        match self {
+            Instance::Token(session) => session.count_text_tokens(text).ok(),
+            Instance::Message(_) => None,
+        }
+    }
 }
 
 #[bindings::export(Class)]
@@ -170,6 +194,52 @@ impl ChatSession {
 
     pub async fn peak_memory_usage(&self) -> Option<usize> {
         self.instance.lock().await.peak_memory_usage()
+    }
+
+    pub async fn context_limit(&self) -> Option<u32> {
+        self.instance.lock().await.context_limit().and_then(|limit| u32::try_from(limit).ok())
+    }
+
+    pub async fn encoded_token_count(&self) -> Option<u32> {
+        self.instance.lock().await.encoded_token_count().and_then(|count| u32::try_from(count).ok())
+    }
+
+    pub async fn count_text_tokens(
+        &self,
+        text: &str,
+    ) -> Option<u32> {
+        self.instance.lock().await.count_text_tokens(text).and_then(|count| u32::try_from(count).ok())
+    }
+
+    /// Clears the backend cache and replaces the stored transcript.
+    /// The next turn prefills these messages from scratch.
+    pub async fn replace_messages(
+        &self,
+        messages: Vec<ChatMessage>,
+    ) -> Result<(), ChatSessionError> {
+        {
+            let mut state = self.state.lock().await;
+            match *state {
+                ChatSessionState::Idle | ChatSessionState::ToolCalling => {
+                    *state = ChatSessionState::Resetting;
+                },
+                ChatSessionState::Generation | ChatSessionState::Resetting => {
+                    return Err(ChatSessionError::UnableToPerformOperationInCurrentState {});
+                },
+            }
+        }
+
+        let result = {
+            let mut guard = self.instance.lock().await;
+            match &mut *guard {
+                Instance::Token(session) => session.reset().await,
+                Instance::Message(session) => session.reset().await,
+            }
+        };
+
+        *self.messages.lock().await = messages;
+        *self.state.lock().await = ChatSessionState::Idle;
+        result
     }
 
     pub async fn add_tool(
@@ -576,30 +646,7 @@ impl ChatSession {
 
     #[bindings::export(Method)]
     pub async fn reset(&self) -> Result<(), ChatSessionError> {
-        {
-            let mut state = self.state.lock().await;
-            match *state {
-                ChatSessionState::Idle | ChatSessionState::ToolCalling => {
-                    *state = ChatSessionState::Resetting;
-                },
-                ChatSessionState::Generation | ChatSessionState::Resetting => {
-                    return Err(ChatSessionError::UnableToPerformOperationInCurrentState {});
-                },
-            }
-        }
-
-        let result = {
-            let mut guard = self.instance.lock().await;
-            match &mut *guard {
-                Instance::Token(session) => session.reset().await,
-                Instance::Message(session) => session.reset().await,
-            }
-        };
-
-        self.messages.lock().await.clear();
-        *self.state.lock().await = ChatSessionState::Idle;
-
-        result
+        self.replace_messages(Vec::new()).await
     }
 
     #[bindings::export(Method)]
